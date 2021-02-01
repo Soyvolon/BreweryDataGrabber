@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
@@ -47,7 +48,7 @@ namespace BreweryDataGrabber
 
             token.ThrowIfCancellationRequested();
 
-            ConcurrentDictionary<string, int> LocationCounts = new();
+            ConcurrentDictionary<string, int> locationCounts = new();
             List<string> order = new();
             HashSet<string> locations = new();
             int c = 0;
@@ -60,15 +61,18 @@ namespace BreweryDataGrabber
                 if(parts.Length > namecol)
                 {
                     var brewery = parts[namecol];
-                    locations.Add(brewery);
-                    LocationCounts[brewery]++;
+                    if (locations.Add(brewery))
+                        _ = locationCounts.TryAdd(brewery, 1);
+                    else
+                        locationCounts[brewery]++;
+
                     order.Add(brewery);
                 }
             }
 
             token.ThrowIfCancellationRequested();
 
-            return (locations, LocationCounts, order);
+            return (locations, locationCounts, order);
         }
 
         private static async Task<ConcurrentDictionary<string, int>> GetBreweryIdsAsync(CancellationToken token, HashSet<string> locations,
@@ -78,37 +82,46 @@ namespace BreweryDataGrabber
 
             ConcurrentDictionary<string, int> ids = new();
 
-            var baseurl = $"locquery/{URL_BASE_ID}/{apiKey}/";
+            var baseurl = $"locquery/{apiKey}/";
 
-            _client.BaseAddress = new(baseurl);
+            _client.BaseAddress = new(URL_BASE_ID);
 
             token.ThrowIfCancellationRequested();
 
             foreach (var l in locations)
             {
-                var request = await _client.GetAsync(l, token);
+                var str = l.ToLower();
+                str = Regex.Replace(str, @"[^a-z]0-9\s-]", ""); // Remove all non valid chars          
+                str = Regex.Replace(str, @"\s+", " ").Trim(); // convert multiple spaces into one space  
+                str = Regex.Replace(str, @"\s", "+"); // //Replace spaces by dashes
+
+                str = str.Replace(".", " ");
+
+                var request = await _client.GetAsync($"{baseurl}{str}", token);
 
                 if(request.IsSuccessStatusCode)
                 {
                     token.ThrowIfCancellationRequested();
 
-                    var raw = await request.Content.ReadAsStreamAsync();
+                    var raw = await request.Content.ReadAsStringAsync();
 
-                    var reader = XmlReader.Create(raw);
+                    var idString = raw[(raw.IndexOf("<id>") + 4)..];
+                    idString = idString[..idString.IndexOf("</id>")];
 
-                    var rawid = reader["id"];
-
-                    token.ThrowIfCancellationRequested();
-
-                    if (int.TryParse(rawid, out var id))
+                    if (int.TryParse(idString, out var id))
+                    {
                         ids[l] = id;
+                        Console.WriteLine($"Got {id} for {l}");
+                    }
                     else
-                        await app.Error.WriteLineAsync($"Failed to get ID for {l}, skipping ...");
+                        await app.Error.WriteLineAsync($"Failed to get ID for {l}");
                 }
                 else
                 {
                     await app.Error.WriteLineAsync($"Failed a request for {l} at {baseurl}/{l}, skipping ...");   
                 }
+
+                await Task.Delay(TimeSpan.FromSeconds(.25));
             }
 
             token.ThrowIfCancellationRequested();
@@ -123,37 +136,46 @@ namespace BreweryDataGrabber
 
             ConcurrentDictionary<string, LatLng> coords = new();
 
-            var baseurl = $"locmap/{URL_BASE_ID}/{apiKey}/";
-
-            _client.BaseAddress = new(baseurl);
+            var baseurl = $"locmap/{apiKey}/";
 
             token.ThrowIfCancellationRequested();
 
             foreach (var id in ids)
             {
+                if(id.Value == 0)
+                {
+                    Console.WriteLine($"ID for {id.Key} is 0, skipping lat/lng grab ...");
+                    continue;
+                }
+
                 token.ThrowIfCancellationRequested();
 
-                var request = await _client.GetAsync(id.Value.ToString(), token);
+                var request = await _client.GetAsync($"{baseurl}{id.Value}", token);
 
                 if (request.IsSuccessStatusCode)
                 {
                     token.ThrowIfCancellationRequested();
 
-                    var raw = await request.Content.ReadAsStreamAsync();
+                    var raw = await request.Content.ReadAsStringAsync();
 
-                    var reader = XmlReader.Create(raw);
+                    string rawlat = raw[(raw.IndexOf("<lat>") + 5)..];
+                    rawlat = rawlat[..rawlat.IndexOf("</lat>")];
 
-                    var rawlat = reader["lat"];
-                    var rawlng = reader["lng"];
+                    string rawlng = raw[(raw.IndexOf("<lng>") + 5)..];
+                    rawlng = rawlng[..rawlng.IndexOf("</lng>")];
 
                     token.ThrowIfCancellationRequested();
 
                     if (double.TryParse(rawlat, out var lat) && double.TryParse(rawlng, out var lng))
+                    {
                         coords[id.Key] = new()
                         {
                             Latitude = lat,
                             Longitude = lng
                         };
+
+                        Console.WriteLine($"Got lat/lng {lat}/{lng} for {id.Key}");
+                    }
                     else
                         await app.Error.WriteLineAsync($"Failed to get lat/lng for {id.Key}, skipping ...");
                 }
@@ -161,6 +183,8 @@ namespace BreweryDataGrabber
                 {
                     await app.Error.WriteLineAsync($"Failed a request for {id} at {baseurl}/{id}, skipping ...");
                 }
+
+                await Task.Delay(TimeSpan.FromSeconds(0.25));
             }
 
             token.ThrowIfCancellationRequested();
@@ -181,19 +205,24 @@ namespace BreweryDataGrabber
             {
                 token.ThrowIfCancellationRequested();
 
-                if(coords.TryGetValue(b, out var c)
-                    && ammountCounts.TryGetValue(b, out var amnt))
+                if(ammountCounts.TryGetValue(b, out var amnt))
                 {
-                    for (int i = 0; i < amnt; i++)
-                        data.Add(string.Join(", ", b, c.Latitude, c.Longitude));
+                    if (coords.TryGetValue(b, out var c))
+                        for (int i = 0; i < amnt; i++)
+                            data.Add(string.Join(", ", b, c.Latitude, c.Longitude));
+                    else for (int i = 0; i < amnt; i++)
+                            data.Add(string.Join(", ", b, "0", "0"));
+
+                    Console.WriteLine($"Stored {amnt} CSV string(s) for {b}");
                 }
                 else
                 {
-                    await app.Error.WriteLineAsync($"Failed to save data for {b}, not lat/lng or ammount counter found.");
+                    await app.Error.WriteLineAsync($"Failed to save data for {b}, no ammount counter found.");
                 }
             }
 
             await WriteResultsAsync(token, data, output);
+            Console.WriteLine($"Results File Saved to {output}");
         }
 
         private static async Task WriteResultsAsync(CancellationToken token, List<string> csvdata, string output)

@@ -55,7 +55,7 @@ namespace BreweryDataGrabber
                     return;
                 }
 
-                await DataGrabber.Execute(cancellationToken, app, input, outFile, key, ncol);
+                await DataGrabber.Execute(cancellationToken, app, input, outFile, key, --ncol);
             });
 
             app.ExecuteAsync(args).GetAwaiter().GetResult();
