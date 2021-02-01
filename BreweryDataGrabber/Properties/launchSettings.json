@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "BreweryDataGrabber": {
+      "commandName": "Project",
+      "commandLineArgs": "-k:\"\" -f:\"Data\\data.csv\" -o:\"Data\\output.csv\" -c:2"
+    }
+  }
+}
